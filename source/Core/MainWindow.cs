@@ -23,12 +23,87 @@ namespace ACE.RCON.Desktop
         {
             Logger.Info("Main window loaded");
 
-            // Set default values
-            txtAddress.Text = "127.0.0.1";
-            txtPort.Text = "9005";
-            radioWebSocket.Checked = true;
+            // Load saved settings
+            LoadConnectionSettings();
 
             UpdateConnectionUI(false);
+        }
+
+        private void LoadConnectionSettings()
+        {
+            try
+            {
+                var configFile = "data/connection.json";
+                if (System.IO.File.Exists(configFile))
+                {
+                    var json = System.IO.File.ReadAllText(configFile);
+                    var settings = Newtonsoft.Json.JsonConvert.DeserializeObject<ConnectionSettings>(json);
+
+                    txtAddress.Text = settings.Address ?? "127.0.0.1";
+                    txtPort.Text = settings.Port.ToString();
+                    txtPassword.Text = settings.Password ?? "";
+                    txtAccountName.Text = settings.AccountName ?? "";
+                    radioTCP.Checked = settings.UseTcp;
+                    radioWebSocket.Checked = !settings.UseTcp;
+
+                    Logger.Info("Loaded connection settings");
+                }
+                else
+                {
+                    // Set defaults
+                    txtAddress.Text = "127.0.0.1";
+                    txtPort.Text = "9005";
+                    radioWebSocket.Checked = true;
+                    Logger.Info("Using default connection settings");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Failed to load connection settings", ex);
+                // Use defaults
+                txtAddress.Text = "127.0.0.1";
+                txtPort.Text = "9005";
+                radioWebSocket.Checked = true;
+            }
+        }
+
+        private void SaveConnectionSettings()
+        {
+            try
+            {
+                var settings = new ConnectionSettings
+                {
+                    Address = txtAddress.Text,
+                    Port = int.Parse(txtPort.Text),
+                    Password = txtPassword.Text,
+                    AccountName = txtAccountName.Text,
+                    UseTcp = radioTCP.Checked
+                };
+
+                var configDir = "data";
+                if (!System.IO.Directory.Exists(configDir))
+                {
+                    System.IO.Directory.CreateDirectory(configDir);
+                }
+
+                var json = Newtonsoft.Json.JsonConvert.SerializeObject(settings, Newtonsoft.Json.Formatting.Indented);
+                System.IO.File.WriteAllText("data/connection.json", json);
+
+                Logger.Info("Saved connection settings");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Failed to save connection settings", ex);
+            }
+        }
+
+        private class ConnectionSettings
+        {
+            public string Address { get; set; }
+            public int Port { get; set; }
+            public string Password { get; set; }
+            public string AccountName { get; set; }
+            public bool UseTcp { get; set; }
         }
 
         private void MainWindow_FormClosing(object sender, FormClosingEventArgs e)
@@ -92,61 +167,41 @@ namespace ACE.RCON.Desktop
 
                 connectionCts = new CancellationTokenSource();
 
-                var connected = await rconClient.ConnectAsync(address, port, useTcp, connectionCts.Token);
+                // New simplified connect and authenticate method
+                var success = await rconClient.ConnectAndAuthenticateAsync(
+                    address,
+                    port,
+                    useTcp,
+                    txtPassword.Text,
+                    txtAccountName.Text, // Empty for Rust-style, filled for ACE-style
+                    connectionCts.Token);
 
-                if (connected)
+                if (success)
                 {
-                    // Now authenticate
-                    bool authenticated = false;
+                    lblStatus.Text = $"Connected ({rconClient.ConnectionType})";
+                    lblStatus.ForeColor = System.Drawing.Color.Green;
+                    UpdateConnectionUI(true);
 
-                    // Try authentication based on what user entered
-                    if (!string.IsNullOrWhiteSpace(txtAccountName.Text))
-                    {
-                        // ACE-style auth
-                        authenticated = await rconClient.AuthenticateAceStyleAsync(
-                            txtAccountName.Text,
-                            txtPassword.Text,
-                            connectionCts.Token);
-                    }
-                    else
-                    {
-                        // Rust-style auth
-                        authenticated = await rconClient.AuthenticateRustStyleAsync(
-                            txtPassword.Text,
-                            connectionCts.Token);
-                    }
+                    AppendLog($"[INFO] Connected to {address}:{port} via {rconClient.ConnectionType}");
+                    AppendLog($"[INFO] Authenticated successfully");
 
-                    if (authenticated)
-                    {
-                        lblStatus.Text = $"Connected ({rconClient.ConnectionType})";
-                        lblStatus.ForeColor = System.Drawing.Color.Green;
-                        UpdateConnectionUI(true);
+                    // Save settings for next time
+                    SaveConnectionSettings();
 
-                        AppendLog($"[INFO] Connected to {address}:{port} via {rconClient.ConnectionType}");
-                        AppendLog($"[INFO] Authenticated successfully");
-
-                        // Send initial "hello" command to get server info
-                        var response = await rconClient.SendCommandAsync("hello", connectionCts.Token);
-                        if (response != null && response.IsSuccess)
-                        {
-                            AppendLog($"[SUCCESS] {response.Message}");
-                        }
-                    }
-                    else
+                    // Send initial "hello" command to get server info
+                    var response = await rconClient.SendCommandAsync("hello", connectionCts.Token);
+                    if (response != null && response.IsSuccess)
                     {
-                        lblStatus.Text = "Authentication failed";
-                        lblStatus.ForeColor = System.Drawing.Color.Red;
-                        MessageBox.Show("Authentication failed. Please check your credentials.", "Auth Error",
-                            MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        await DisconnectAsync();
+                        AppendLog($"[SUCCESS] {response.Message}");
                     }
                 }
                 else
                 {
-                    lblStatus.Text = "Connection failed";
+                    lblStatus.Text = "Connection/Auth failed";
                     lblStatus.ForeColor = System.Drawing.Color.Red;
-                    MessageBox.Show("Failed to connect to server. Please check the address and port.", "Connection Error",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show("Failed to connect or authenticate. Check logs for details.\n\nMake sure:\n- Server is running\n- RCON is enabled\n- Correct password\n- For ACE auth: Account has AccessLevel >= 4",
+                        "Connection Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    await DisconnectAsync();
                 }
             }
             catch (Exception ex)
@@ -154,7 +209,8 @@ namespace ACE.RCON.Desktop
                 Logger.Error("Connection error", ex);
                 lblStatus.Text = "Error";
                 lblStatus.ForeColor = System.Drawing.Color.Red;
-                MessageBox.Show($"Connection error: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Connection error: {ex.Message}\n\nCheck logs for details.", "Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
