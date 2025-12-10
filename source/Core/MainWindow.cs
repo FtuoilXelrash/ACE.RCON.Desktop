@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Linq;
 using System.Threading;
 using System.Windows.Forms;
 using ACE.RCON.Desktop.RCON;
@@ -12,21 +15,209 @@ namespace ACE.RCON.Desktop
         private AceRconClient rconClient;
         private CancellationTokenSource connectionCts;
 
+        // Command and broadcast history
+        private List<string> commandHistory = new List<string>();
+        private List<string> broadcastHistory = new List<string>();
+        private const int MaxHistoryItems = 50;
+
+        // Player tracking
+        private List<PlayerInfo> currentPlayers = new List<PlayerInfo>();
+        private Timer playerRefreshTimer;
+
+        // Chat messages
+        private List<ChatMessage> chatMessages = new List<ChatMessage>();
+
+        // Ban list
+        private List<BannedAccount> bannedAccounts = new List<BannedAccount>();
+
+        // Server status
+        private ServerStatus serverStatus = new ServerStatus();
+
+        // Console filters
+        private HashSet<string> activeModuleFilters = new HashSet<string>();
+
         public MainWindow()
         {
             InitializeComponent();
             this.Load += MainWindow_Load;
             this.FormClosing += MainWindow_FormClosing;
+            this.Resize += MainWindow_Resize;
+
+            // Wire up all event handlers
+            WireUpEventHandlers();
+        }
+
+        private void WireUpEventHandlers()
+        {
+            // Connection panel
+            btnConnect.Click += btnConnect_Click;
+
+            // Console tab
+            btnSendCommand.Click += btnSendCommand_Click;
+            comboCommandHistory.SelectedIndexChanged += comboCommandHistory_SelectedIndexChanged;
+            txtCommand.KeyPress += txtCommand_KeyPress;
+            btnSendBroadcast.Click += btnSendBroadcast_Click;
+            comboBroadcastHistory.SelectedIndexChanged += comboBroadcastHistory_SelectedIndexChanged;
+
+            // Console filters
+            chkFilterACEProgram.CheckedChanged += ConsoleFilter_CheckedChanged;
+            chkFilterDatabase.CheckedChanged += ConsoleFilter_CheckedChanged;
+            chkFilterDatManager.CheckedChanged += ConsoleFilter_CheckedChanged;
+            chkFilterEntity.CheckedChanged += ConsoleFilter_CheckedChanged;
+            chkFilterEventManager.CheckedChanged += ConsoleFilter_CheckedChanged;
+            chkFilterGuidManager.CheckedChanged += ConsoleFilter_CheckedChanged;
+            chkFilterLandblockManager.CheckedChanged += ConsoleFilter_CheckedChanged;
+            chkFilterManagers.CheckedChanged += ConsoleFilter_CheckedChanged;
+            chkFilterModManager.CheckedChanged += ConsoleFilter_CheckedChanged;
+            chkFilterNetwork.CheckedChanged += ConsoleFilter_CheckedChanged;
+            chkFilterPlayerManager.CheckedChanged += ConsoleFilter_CheckedChanged;
+            chkFilterPropertyManager.CheckedChanged += ConsoleFilter_CheckedChanged;
+
+            // Players tab
+            btnRefreshPlayers.Click += btnRefreshPlayers_Click;
+            chkAutoRefreshPlayers.CheckedChanged += chkAutoRefreshPlayers_CheckedChanged;
+            dataGridPlayers.SelectionChanged += dataGridPlayers_SelectionChanged;
+            btnBootPlayer.Click += btnBootPlayer_Click;
+            btnBanPlayer.Click += btnBanPlayer_Click;
+            btnMutePlayer.Click += btnMutePlayer_Click;
+
+            // Server Info tab - quick commands
+            btnStatusCommand.Click += btnStatusCommand_Click;
+            btnHelloCommand.Click += btnHelloCommand_Click;
+            btnAceCommandsCommand.Click += btnAceCommandsCommand_Click;
+            btnListPlayersCommand.Click += btnListPlayersCommand_Click;
+            btnPopulationCommand.Click += btnPopulationCommand_Click;
+            btnOpenWorldCommand.Click += btnOpenWorldCommand_Click;
+            btnCloseWorldCommand.Click += btnCloseWorldCommand_Click;
+            btnStopServerCommand.Click += btnStopServerCommand_Click;
+
+            // Bans tab
+            btnFetchBans.Click += btnFetchBans_Click;
+            dataGridBans.SelectionChanged += dataGridBans_SelectionChanged;
+            btnUnbanAccount.Click += btnUnbanAccount_Click;
+
+            // System tray
+            notifyIcon.DoubleClick += notifyIcon_DoubleClick;
         }
 
         private void MainWindow_Load(object sender, EventArgs e)
         {
             Logger.Info("Main window loaded");
 
+            // Initialize console filters (all enabled by default)
+            InitializeConsoleFilters();
+
+            // Initialize player auto-refresh timer
+            playerRefreshTimer = new Timer();
+            playerRefreshTimer.Interval = 30000; // 30 seconds
+            playerRefreshTimer.Tick += PlayerRefreshTimer_Tick;
+
+            // Initialize DataGridView columns
+            InitializePlayerDataGrid();
+            InitializeBanDataGrid();
+
             // Load saved settings
             LoadConnectionSettings();
 
             UpdateConnectionUI(false);
+
+            // Set initial tab
+            tabControl.SelectedIndex = 0;
+        }
+
+        private void InitializeConsoleFilters()
+        {
+            // Enable all module filters by default
+            activeModuleFilters.Add("ACE.Server.Program");
+            activeModuleFilters.Add("ACE.Database");
+            activeModuleFilters.Add("ACE.DatLoader");
+            activeModuleFilters.Add("ACE.Entity");
+            activeModuleFilters.Add("ACE.Server.Managers.EventManager");
+            activeModuleFilters.Add("ACE.Server.Managers.GuidManager");
+            activeModuleFilters.Add("ACE.Server.Managers.LandblockManager");
+            activeModuleFilters.Add("ACE.Server.Managers");
+            activeModuleFilters.Add("ACE.Server.Mods");
+            activeModuleFilters.Add("ACE.Server.Network");
+            activeModuleFilters.Add("ACE.Server.Managers.PlayerManager");
+            activeModuleFilters.Add("ACE.Server.Managers.PropertyManager");
+        }
+
+        private void InitializePlayerDataGrid()
+        {
+            dataGridPlayers.AutoGenerateColumns = false;
+            dataGridPlayers.Columns.Clear();
+
+            dataGridPlayers.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = "colPlayerName",
+                HeaderText = "Character",
+                DataPropertyName = "Name",
+                Width = 150
+            });
+
+            dataGridPlayers.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = "colAccountName",
+                HeaderText = "Account",
+                DataPropertyName = "AccountName",
+                Width = 120
+            });
+
+            dataGridPlayers.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = "colLevel",
+                HeaderText = "Level",
+                DataPropertyName = "Level",
+                Width = 60
+            });
+
+            dataGridPlayers.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = "colRace",
+                HeaderText = "Race",
+                DataPropertyName = "Race",
+                Width = 80
+            });
+
+            dataGridPlayers.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = "colLocation",
+                HeaderText = "Location",
+                DataPropertyName = "Location",
+                Width = 200,
+                AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
+            });
+        }
+
+        private void InitializeBanDataGrid()
+        {
+            dataGridBans.AutoGenerateColumns = false;
+            dataGridBans.Columns.Clear();
+
+            dataGridBans.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = "colBanAccount",
+                HeaderText = "Account Name",
+                DataPropertyName = "AccountName",
+                Width = 200
+            });
+
+            dataGridBans.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = "colBanExpiration",
+                HeaderText = "Ban Expiration",
+                DataPropertyName = "BanExpiration",
+                Width = 150
+            });
+
+            dataGridBans.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = "colBanReason",
+                HeaderText = "Reason",
+                DataPropertyName = "BanReason",
+                Width = 300,
+                AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
+            });
         }
 
         private void LoadConnectionSettings()
@@ -259,6 +450,9 @@ namespace ACE.RCON.Desktop
             {
                 AppendLog($"[CMD] > {command}");
 
+                // Add to command history
+                AddCommandToHistory(command);
+
                 var response = await rconClient.SendCommandAsync(command, connectionCts.Token);
 
                 if (response != null)
@@ -365,6 +559,616 @@ namespace ACE.RCON.Desktop
         {
             Logger.Error("RCON error", e);
             AppendLog($"[ERROR] {e.Message}");
+        }
+
+        // ==================== CONSOLE TAB ====================
+
+        private void comboCommandHistory_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (comboCommandHistory.SelectedItem != null)
+            {
+                txtCommand.Text = comboCommandHistory.SelectedItem.ToString();
+                txtCommand.SelectAll();
+                txtCommand.Focus();
+            }
+        }
+
+        private void comboBroadcastHistory_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (comboBroadcastHistory.SelectedItem != null)
+            {
+                txtBroadcast.Text = comboBroadcastHistory.SelectedItem.ToString();
+                txtBroadcast.SelectAll();
+                txtBroadcast.Focus();
+            }
+        }
+
+        private async void btnSendBroadcast_Click(object sender, EventArgs e)
+        {
+            if (rconClient == null || !rconClient.IsAuthenticated)
+            {
+                MessageBox.Show("Not connected or authenticated.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var message = txtBroadcast.Text.Trim();
+            if (string.IsNullOrEmpty(message))
+                return;
+
+            try
+            {
+                AppendLog($"[BROADCAST] {message}");
+
+                // Send broadcast command
+                var response = await rconClient.SendCommandAsync($"broadcast {message}", connectionCts.Token);
+
+                if (response != null && response.IsSuccess)
+                {
+                    AppendLog($"[SUCCESS] Broadcast sent");
+
+                    // Add to history
+                    AddBroadcastToHistory(message);
+                    txtBroadcast.Clear();
+                }
+                else
+                {
+                    AppendLog($"[ERROR] Failed to send broadcast");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Broadcast error", ex);
+                AppendLog($"[ERROR] {ex.Message}");
+            }
+        }
+
+        private void AddCommandToHistory(string command)
+        {
+            if (string.IsNullOrWhiteSpace(command))
+                return;
+
+            // Remove if already exists
+            commandHistory.Remove(command);
+
+            // Add to beginning
+            commandHistory.Insert(0, command);
+
+            // Limit size
+            if (commandHistory.Count > MaxHistoryItems)
+                commandHistory.RemoveAt(commandHistory.Count - 1);
+
+            // Update dropdown
+            RefreshCommandHistoryDropdown();
+        }
+
+        private void AddBroadcastToHistory(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+                return;
+
+            broadcastHistory.Remove(message);
+            broadcastHistory.Insert(0, message);
+
+            if (broadcastHistory.Count > MaxHistoryItems)
+                broadcastHistory.RemoveAt(broadcastHistory.Count - 1);
+
+            RefreshBroadcastHistoryDropdown();
+        }
+
+        private void RefreshCommandHistoryDropdown()
+        {
+            if (InvokeRequired)
+            {
+                Invoke(new Action(RefreshCommandHistoryDropdown));
+                return;
+            }
+
+            comboCommandHistory.Items.Clear();
+            foreach (var cmd in commandHistory)
+            {
+                comboCommandHistory.Items.Add(cmd);
+            }
+        }
+
+        private void RefreshBroadcastHistoryDropdown()
+        {
+            if (InvokeRequired)
+            {
+                Invoke(new Action(RefreshBroadcastHistoryDropdown));
+                return;
+            }
+
+            comboBroadcastHistory.Items.Clear();
+            foreach (var msg in broadcastHistory)
+            {
+                comboBroadcastHistory.Items.Add(msg);
+            }
+        }
+
+        private void ConsoleFilter_CheckedChanged(object sender, EventArgs e)
+        {
+            var checkbox = sender as CheckBox;
+            if (checkbox == null)
+                return;
+
+            string moduleName = GetModuleNameForCheckbox(checkbox);
+            if (string.IsNullOrEmpty(moduleName))
+                return;
+
+            if (checkbox.Checked)
+            {
+                activeModuleFilters.Add(moduleName);
+            }
+            else
+            {
+                activeModuleFilters.Remove(moduleName);
+            }
+
+            Logger.Debug($"Filter {moduleName}: {checkbox.Checked}");
+        }
+
+        private string GetModuleNameForCheckbox(CheckBox checkbox)
+        {
+            if (checkbox == chkFilterACEProgram) return "ACE.Server.Program";
+            if (checkbox == chkFilterDatabase) return "ACE.Database";
+            if (checkbox == chkFilterDatManager) return "ACE.DatLoader";
+            if (checkbox == chkFilterEntity) return "ACE.Entity";
+            if (checkbox == chkFilterEventManager) return "ACE.Server.Managers.EventManager";
+            if (checkbox == chkFilterGuidManager) return "ACE.Server.Managers.GuidManager";
+            if (checkbox == chkFilterLandblockManager) return "ACE.Server.Managers.LandblockManager";
+            if (checkbox == chkFilterManagers) return "ACE.Server.Managers";
+            if (checkbox == chkFilterModManager) return "ACE.Server.Mods";
+            if (checkbox == chkFilterNetwork) return "ACE.Server.Network";
+            if (checkbox == chkFilterPlayerManager) return "ACE.Server.Managers.PlayerManager";
+            if (checkbox == chkFilterPropertyManager) return "ACE.Server.Managers.PropertyManager";
+            return null;
+        }
+
+        // ==================== PLAYERS TAB ====================
+
+        private async void btnRefreshPlayers_Click(object sender, EventArgs e)
+        {
+            await RefreshPlayerListAsync();
+        }
+
+        private void chkAutoRefreshPlayers_CheckedChanged(object sender, EventArgs e)
+        {
+            if (chkAutoRefreshPlayers.Checked)
+            {
+                playerRefreshTimer.Start();
+                Logger.Info("Player auto-refresh enabled");
+            }
+            else
+            {
+                playerRefreshTimer.Stop();
+                Logger.Info("Player auto-refresh disabled");
+            }
+        }
+
+        private async void PlayerRefreshTimer_Tick(object sender, EventArgs e)
+        {
+            await RefreshPlayerListAsync();
+        }
+
+        private async System.Threading.Tasks.Task RefreshPlayerListAsync()
+        {
+            if (rconClient == null || !rconClient.IsAuthenticated)
+                return;
+
+            try
+            {
+                var response = await rconClient.SendCommandAsync("listplayers", connectionCts.Token);
+
+                if (response != null && response.IsSuccess)
+                {
+                    // Parse player list from response
+                    // The response.Data should contain player info
+                    var players = response.GetData<List<PlayerInfo>>();
+
+                    if (players != null)
+                    {
+                        UpdatePlayerList(players);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Failed to refresh player list", ex);
+            }
+        }
+
+        private void UpdatePlayerList(List<PlayerInfo> players)
+        {
+            if (InvokeRequired)
+            {
+                Invoke(new Action<List<PlayerInfo>>(UpdatePlayerList), players);
+                return;
+            }
+
+            currentPlayers = players;
+            dataGridPlayers.DataSource = null;
+            dataGridPlayers.DataSource = currentPlayers;
+
+            lblPlayerCount.Text = $"Players: {currentPlayers.Count}";
+        }
+
+        private void dataGridPlayers_SelectionChanged(object sender, EventArgs e)
+        {
+            bool hasSelection = dataGridPlayers.SelectedRows.Count > 0;
+
+            btnBootPlayer.Enabled = hasSelection;
+            btnBanPlayer.Enabled = hasSelection;
+            btnMutePlayer.Enabled = hasSelection;
+
+            if (hasSelection && dataGridPlayers.SelectedRows[0].DataBoundItem is PlayerInfo player)
+            {
+                lblSelectedPlayer.Text = $"Selected: {player.Name}";
+            }
+            else
+            {
+                lblSelectedPlayer.Text = "Selected: None";
+            }
+        }
+
+        private async void btnBootPlayer_Click(object sender, EventArgs e)
+        {
+            if (dataGridPlayers.SelectedRows.Count == 0)
+                return;
+
+            var player = dataGridPlayers.SelectedRows[0].DataBoundItem as PlayerInfo;
+            if (player == null)
+                return;
+
+            var result = MessageBox.Show(
+                $"Boot player '{player.Name}'?\n\nThis will disconnect them from the server.",
+                "Confirm Boot",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (result != DialogResult.Yes)
+                return;
+
+            try
+            {
+                var response = await rconClient.SendCommandAsync($"boot char {player.Name}", connectionCts.Token);
+
+                if (response != null && response.IsSuccess)
+                {
+                    AppendLog($"[SUCCESS] Booted player: {player.Name}");
+                    await RefreshPlayerListAsync();
+                }
+                else
+                {
+                    AppendLog($"[ERROR] Failed to boot player: {player.Name}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Boot player error", ex);
+                MessageBox.Show($"Error booting player: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private async void btnBanPlayer_Click(object sender, EventArgs e)
+        {
+            if (dataGridPlayers.SelectedRows.Count == 0)
+                return;
+
+            var player = dataGridPlayers.SelectedRows[0].DataBoundItem as PlayerInfo;
+            if (player == null || string.IsNullOrEmpty(player.AccountName))
+                return;
+
+            var result = MessageBox.Show(
+                $"Ban account '{player.AccountName}' (character: {player.Name})?\n\nThis will permanently ban the account.",
+                "Confirm Ban",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (result != DialogResult.Yes)
+                return;
+
+            try
+            {
+                var response = await rconClient.SendCommandAsync($"ban {player.AccountName}", connectionCts.Token);
+
+                if (response != null && response.IsSuccess)
+                {
+                    AppendLog($"[SUCCESS] Banned account: {player.AccountName}");
+                    await RefreshPlayerListAsync();
+                }
+                else
+                {
+                    AppendLog($"[ERROR] Failed to ban account: {player.AccountName}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Ban player error", ex);
+                MessageBox.Show($"Error banning player: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private async void btnMutePlayer_Click(object sender, EventArgs e)
+        {
+            if (dataGridPlayers.SelectedRows.Count == 0)
+                return;
+
+            var player = dataGridPlayers.SelectedRows[0].DataBoundItem as PlayerInfo;
+            if (player == null)
+                return;
+
+            var result = MessageBox.Show(
+                $"Mute player '{player.Name}'?\n\nThis will prevent them from using chat.",
+                "Confirm Mute",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (result != DialogResult.Yes)
+                return;
+
+            try
+            {
+                var response = await rconClient.SendCommandAsync($"gag {player.Name}", connectionCts.Token);
+
+                if (response != null && response.IsSuccess)
+                {
+                    AppendLog($"[SUCCESS] Muted player: {player.Name}");
+                }
+                else
+                {
+                    AppendLog($"[ERROR] Failed to mute player: {player.Name}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Mute player error", ex);
+                MessageBox.Show($"Error muting player: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // ==================== SERVER INFO TAB ====================
+
+        private async void btnStatusCommand_Click(object sender, EventArgs e)
+        {
+            await SendQuickCommandAsync("status");
+        }
+
+        private async void btnHelloCommand_Click(object sender, EventArgs e)
+        {
+            await SendQuickCommandAsync("hello");
+        }
+
+        private async void btnAceCommandsCommand_Click(object sender, EventArgs e)
+        {
+            await SendQuickCommandAsync("acecommands");
+        }
+
+        private async void btnListPlayersCommand_Click(object sender, EventArgs e)
+        {
+            await SendQuickCommandAsync("listplayers");
+        }
+
+        private async void btnPopulationCommand_Click(object sender, EventArgs e)
+        {
+            await SendQuickCommandAsync("pop");
+        }
+
+        private async void btnOpenWorldCommand_Click(object sender, EventArgs e)
+        {
+            var result = MessageBox.Show(
+                "Open the server to new connections?",
+                "Confirm Open World",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (result == DialogResult.Yes)
+            {
+                await SendQuickCommandAsync("world-open");
+            }
+        }
+
+        private async void btnCloseWorldCommand_Click(object sender, EventArgs e)
+        {
+            var result = MessageBox.Show(
+                "Close the server to new connections?\n\nExisting players will remain connected.",
+                "Confirm Close World",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (result == DialogResult.Yes)
+            {
+                await SendQuickCommandAsync("world-closed");
+            }
+        }
+
+        private async void btnStopServerCommand_Click(object sender, EventArgs e)
+        {
+            var result = MessageBox.Show(
+                "STOP THE SERVER NOW?\n\nThis will immediately shut down the server and disconnect all players!\n\nAre you absolutely sure?",
+                "CONFIRM STOP SERVER",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Stop);
+
+            if (result == DialogResult.Yes)
+            {
+                await SendQuickCommandAsync("stop now");
+            }
+        }
+
+        private async System.Threading.Tasks.Task SendQuickCommandAsync(string command)
+        {
+            if (rconClient == null || !rconClient.IsAuthenticated)
+            {
+                MessageBox.Show("Not connected or authenticated.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                AppendLog($"[CMD] > {command}");
+                var response = await rconClient.SendCommandAsync(command, connectionCts.Token);
+
+                if (response != null)
+                {
+                    if (response.IsSuccess)
+                    {
+                        AppendLog($"[SUCCESS] {response.Message}");
+                    }
+                    else
+                    {
+                        AppendLog($"[ERROR] {response.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Quick command error", ex);
+                AppendLog($"[ERROR] {ex.Message}");
+            }
+        }
+
+        private void UpdateServerInfo(ServerStatus status)
+        {
+            if (InvokeRequired)
+            {
+                Invoke(new Action<ServerStatus>(UpdateServerInfo), status);
+                return;
+            }
+
+            serverStatus = status;
+
+            lblServerStatus.Text = $"Status: {status.Status ?? "Unknown"}";
+            lblServerPlayers.Text = $"Players: {status.CurrentPlayers}/{status.MaxPlayers}";
+            lblServerUptime.Text = $"Uptime: {status.GetFormattedUptime()}";
+            lblAceVersion.Text = $"ACE Version: {status.AceServerVersion ?? "Unknown"}";
+            lblDatabaseBaseVersion.Text = $"Base Version: {status.DatabaseBaseVersion ?? "Unknown"}";
+            lblDatabasePatchVersion.Text = $"Patch Version: {status.DatabasePatchVersion ?? "Unknown"}";
+        }
+
+        // ==================== BANS TAB ====================
+
+        private async void btnFetchBans_Click(object sender, EventArgs e)
+        {
+            if (rconClient == null || !rconClient.IsAuthenticated)
+            {
+                MessageBox.Show("Not connected or authenticated.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                var response = await rconClient.SendCommandAsync("listbans", connectionCts.Token);
+
+                if (response != null && response.IsSuccess)
+                {
+                    var bans = response.GetData<List<BannedAccount>>();
+
+                    if (bans != null)
+                    {
+                        UpdateBanList(bans);
+                    }
+                }
+                else
+                {
+                    MessageBox.Show("Failed to fetch ban list. Check logs for details.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Fetch bans error", ex);
+                MessageBox.Show($"Error fetching bans: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void UpdateBanList(List<BannedAccount> bans)
+        {
+            if (InvokeRequired)
+            {
+                Invoke(new Action<List<BannedAccount>>(UpdateBanList), bans);
+                return;
+            }
+
+            bannedAccounts = bans;
+            dataGridBans.DataSource = null;
+            dataGridBans.DataSource = bannedAccounts;
+        }
+
+        private void dataGridBans_SelectionChanged(object sender, EventArgs e)
+        {
+            bool hasSelection = dataGridBans.SelectedRows.Count > 0;
+
+            btnUnbanAccount.Enabled = hasSelection;
+
+            if (hasSelection && dataGridBans.SelectedRows[0].DataBoundItem is BannedAccount ban)
+            {
+                lblBanAccount.Text = $"Account: {ban.AccountName}";
+                lblBanExpiration.Text = $"Expires: {ban.BanExpiration ?? "Permanent"}";
+            }
+            else
+            {
+                lblBanAccount.Text = "Account: None";
+                lblBanExpiration.Text = "Expires: N/A";
+            }
+        }
+
+        private async void btnUnbanAccount_Click(object sender, EventArgs e)
+        {
+            if (dataGridBans.SelectedRows.Count == 0)
+                return;
+
+            var ban = dataGridBans.SelectedRows[0].DataBoundItem as BannedAccount;
+            if (ban == null)
+                return;
+
+            var result = MessageBox.Show(
+                $"Unban account '{ban.AccountName}'?\n\nThis will allow the account to connect again.",
+                "Confirm Unban",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (result != DialogResult.Yes)
+                return;
+
+            try
+            {
+                var response = await rconClient.SendCommandAsync($"unban {ban.AccountName}", connectionCts.Token);
+
+                if (response != null && response.IsSuccess)
+                {
+                    AppendLog($"[SUCCESS] Unbanned account: {ban.AccountName}");
+                    await System.Threading.Tasks.Task.Delay(500);
+                    btnFetchBans.PerformClick();
+                }
+                else
+                {
+                    AppendLog($"[ERROR] Failed to unban account: {ban.AccountName}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Unban account error", ex);
+                MessageBox.Show($"Error unbanning account: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // ==================== SYSTEM TRAY ====================
+
+        private void MainWindow_Resize(object sender, EventArgs e)
+        {
+            if (this.WindowState == FormWindowState.Minimized)
+            {
+                this.Hide();
+                notifyIcon.Visible = true;
+                notifyIcon.ShowBalloonTip(2000, "ACE RCON Desktop", "Minimized to system tray", ToolTipIcon.Info);
+            }
+        }
+
+        private void notifyIcon_DoubleClick(object sender, EventArgs e)
+        {
+            this.Show();
+            this.WindowState = FormWindowState.Normal;
+            this.Activate();
+            notifyIcon.Visible = false;
         }
     }
 }
