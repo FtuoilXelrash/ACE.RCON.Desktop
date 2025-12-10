@@ -65,14 +65,27 @@ namespace ACE.RCON.Desktop.RCON
         public string ConnectionType => connection?.ConnectionType ?? "None";
 
         /// <summary>
-        /// Connects to an ACE RCON server using the specified transport
+        /// Connects and authenticates to an ACE RCON server
         /// </summary>
-        public async Task<bool> ConnectAsync(string address, int port, bool useTcp, CancellationToken cancellationToken)
+        /// <param name="address">Server address</param>
+        /// <param name="port">Server port</param>
+        /// <param name="useTcp">Use TCP if true, WebSocket if false</param>
+        /// <param name="password">RCON password</param>
+        /// <param name="accountName">Account name (for ACE-style auth), leave empty for Rust-style</param>
+        /// <param name="cancellationToken">Cancellation token</param>
+        public async Task<bool> ConnectAndAuthenticateAsync(string address, int port, bool useTcp,
+            string password, string accountName, CancellationToken cancellationToken)
         {
             try
             {
                 ServerAddress = address;
                 ServerPort = port;
+
+                // Determine auth style based on whether account name is provided
+                bool useAceAuth = !string.IsNullOrWhiteSpace(accountName);
+
+                Logger.Info($"Connecting to {address}:{port} via {(useTcp ? "TCP" : "WebSocket")}...");
+                Logger.Info($"Auth mode: {(useAceAuth ? "ACE-style (account+password)" : "Rust-style (password only)")}");
 
                 // Create appropriate connection type
                 connection = useTcp ? (IConnection)new TcpConnection() : new WebSocketConnection();
@@ -81,85 +94,50 @@ namespace ACE.RCON.Desktop.RCON
                 connection.MessageReceived += OnConnectionMessageReceived;
                 connection.ConnectionClosed += OnConnectionClosed;
 
-                // Connect without password first (will authenticate separately)
-                var connected = await connection.ConnectAsync(address, port, null, cancellationToken);
+                // For Rust-style, password goes in connection (URL or first message)
+                // For ACE-style, we connect without password and send auth command after
+                string connectionPassword = useAceAuth ? null : password;
 
-                if (connected)
+                var connected = await connection.ConnectAsync(address, port, connectionPassword, cancellationToken);
+
+                if (!connected)
                 {
-                    Logger.Info($"Connected to {address}:{port} via {ConnectionType}");
-
-                    // Auto-detect authentication mode
-                    await DetectAuthenticationModeAsync(cancellationToken);
-
-                    OnConnected();
-                    return true;
+                    Logger.Error("Connection failed");
+                    return false;
                 }
 
-                return false;
-            }
-            catch (Exception ex)
-            {
-                Logger.Error("Connection failed", ex);
-                OnError(ex);
-                return false;
-            }
-        }
+                Logger.Info($"Connected to {address}:{port} via {ConnectionType}");
+                OnConnected();
 
-        /// <summary>
-        /// Auto-detects the server's authentication mode by sending a config command
-        /// </summary>
-        private async Task DetectAuthenticationModeAsync(CancellationToken cancellationToken)
-        {
-            try
-            {
-                Logger.Info("Auto-detecting authentication mode...");
-
-                var response = await SendCommandAsync("config", cancellationToken, timeout: TimeSpan.FromSeconds(5));
-
-                if (response != null && response.IsSuccess)
+                // For ACE-style, send auth command
+                if (useAceAuth)
                 {
-                    useAceAuthentication = response.GetData("UseAceAuthentication", false);
-                    Logger.Info($"Authentication mode: {(useAceAuthentication ? "ACE-style (account+password)" : "Rust-style (password only)")}");
+                    return await AuthenticateAceStyleAsync(accountName, password, cancellationToken);
                 }
                 else
                 {
-                    Logger.Warning("Could not detect auth mode, defaulting to Rust-style");
-                    useAceAuthentication = false;
+                    // For Rust-style, we're already authenticated via the connection
+                    // But we need to wait for the auth response
+                    await Task.Delay(500, cancellationToken); // Give server time to respond
+
+                    // Check if we got any error
+                    if (IsConnected)
+                    {
+                        IsAuthenticated = true;
+                        Logger.Info("Rust-style authentication successful (password in connection)");
+                        return true;
+                    }
+                    else
+                    {
+                        Logger.Error("Rust-style authentication failed - connection was closed by server");
+                        return false;
+                    }
                 }
             }
             catch (Exception ex)
             {
-                Logger.Warning($"Failed to detect auth mode: {ex.Message}. Defaulting to Rust-style");
-                useAceAuthentication = false;
-            }
-        }
-
-        /// <summary>
-        /// Authenticates using Rust-style password
-        /// </summary>
-        public async Task<bool> AuthenticateRustStyleAsync(string password, CancellationToken cancellationToken)
-        {
-            try
-            {
-                Logger.Info("Authenticating with Rust-style password...");
-
-                // For Rust-style, we need to reconnect with password in URL/first message
-                // This should have been done during connection, but if not, send auth command
-                var response = await SendCommandAsync("auth", cancellationToken, timeout: TimeSpan.FromSeconds(5));
-
-                if (response != null && response.Status == RconStatus.Authenticated)
-                {
-                    IsAuthenticated = true;
-                    Logger.Info("Rust-style authentication successful");
-                    return true;
-                }
-
-                Logger.Warning("Rust-style authentication failed");
-                return false;
-            }
-            catch (Exception ex)
-            {
-                Logger.Error("Authentication error", ex);
+                Logger.Error("Connection/authentication failed", ex);
+                OnError(ex);
                 return false;
             }
         }
@@ -167,11 +145,11 @@ namespace ACE.RCON.Desktop.RCON
         /// <summary>
         /// Authenticates using ACE-style account and password
         /// </summary>
-        public async Task<bool> AuthenticateAceStyleAsync(string accountName, string password, CancellationToken cancellationToken)
+        private async Task<bool> AuthenticateAceStyleAsync(string accountName, string password, CancellationToken cancellationToken)
         {
             try
             {
-                Logger.Info($"Authenticating with ACE-style credentials for account: {accountName}...");
+                Logger.Info($"Sending ACE-style auth command for account: {accountName}...");
 
                 var request = new RconRequest
                 {
@@ -181,7 +159,7 @@ namespace ACE.RCON.Desktop.RCON
                     Name = accountName
                 };
 
-                var response = await SendRequestAsync(request, cancellationToken, timeout: TimeSpan.FromSeconds(5));
+                var response = await SendRequestAsync(request, cancellationToken, timeout: TimeSpan.FromSeconds(10));
 
                 if (response != null && response.Status == RconStatus.Authenticated)
                 {
@@ -195,7 +173,7 @@ namespace ACE.RCON.Desktop.RCON
             }
             catch (Exception ex)
             {
-                Logger.Error("Authentication error", ex);
+                Logger.Error("ACE-style authentication error", ex);
                 return false;
             }
         }
