@@ -37,7 +37,11 @@ namespace ACE.RCON.Desktop.RCON
                     ? $"ws://{address}:{port}/rcon"
                     : $"ws://{address}:{port}/{password}";
 
-                Logger.Debug($"WebSocket URL: {url.Replace(password, "***")}");
+                // Log URL safely (hide password if present)
+                var safeUrl = string.IsNullOrEmpty(password)
+                    ? url
+                    : url.Replace(password, "***");
+                Logger.Debug($"WebSocket URL: {safeUrl}");
 
                 await webSocket.ConnectAsync(new Uri(url), cancellationToken);
 
